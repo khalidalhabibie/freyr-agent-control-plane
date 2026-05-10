@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: freyr-postgres
+    environment:
+      POSTGRES_DB: freyr_agent_control_plane
+      POSTGRES_USER: freyr
+      POSTGRES_PASSWORD: freyr
+    ports:
+      - "5432:5432"
+    volumes:
+      - freyr-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U freyr -d freyr_agent_control_plane"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  freyr-postgres-data:
