@@ -20,15 +20,22 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.AbstractPlatformTransactionManager;
+import org.springframework.transaction.support.DefaultTransactionStatus;
 
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -51,6 +58,8 @@ class RuleBasedSchedulingAgentTest {
     private AgentProposalItemRepository agentProposalItemRepository;
 
     private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
+    private final RecordingTransactionManager transactionManager = new RecordingTransactionManager();
+    private final AtomicReference<AgentExecution> savedExecution = new AtomicReference<>();
 
     @Test
     void runCreatesProposalItemsByPriorityAndCapacity() {
@@ -60,13 +69,7 @@ class RuleBasedSchedulingAgentTest {
         Agronomist agronomist = agronomist("Dewi Lestari", "Aceh Besar", 1);
         UUID proposalId = UUID.randomUUID();
 
-        when(agentExecutionRepository.save(any(AgentExecution.class))).thenAnswer(invocation -> {
-            AgentExecution execution = invocation.getArgument(0);
-            if (execution.getId() == null) {
-                execution.prePersist();
-            }
-            return execution;
-        });
+        mockAgentExecutionPersistence();
         when(fieldTaskRepository.findUnassignedTasksByDistrictAndDueDate("Aceh Besar", scheduleDate))
                 .thenReturn(List.of(lowTask, criticalTask));
         when(agronomistRepository.findByAssignedDistrictAndAvailabilityStatus("Aceh Besar", AvailabilityStatus.AVAILABLE))
@@ -88,6 +91,8 @@ class RuleBasedSchedulingAgentTest {
         assertThat(response.message()).isEqualTo("Scheduling proposal has been generated and requires approval");
         assertThat(criticalTask.getStatus()).isEqualTo(TaskStatus.PROPOSED);
         assertThat(lowTask.getStatus()).isEqualTo(TaskStatus.CREATED);
+        assertThat(transactionManager.commits()).isEqualTo(1);
+        assertThat(transactionManager.rollbacks()).isZero();
 
         ArgumentCaptor<AgentProposalItem> itemCaptor = ArgumentCaptor.forClass(AgentProposalItem.class);
         verify(agentProposalItemRepository).save(itemCaptor.capture());
@@ -98,7 +103,7 @@ class RuleBasedSchedulingAgentTest {
         assertThat(item.getConfidenceScore()).isEqualByComparingTo("1.0000");
 
         ArgumentCaptor<AgentExecution> executionCaptor = ArgumentCaptor.forClass(AgentExecution.class);
-        verify(agentExecutionRepository, org.mockito.Mockito.times(2)).save(executionCaptor.capture());
+        verify(agentExecutionRepository, times(2)).save(executionCaptor.capture());
         AgentExecution completedExecution = executionCaptor.getAllValues().getLast();
         assertThat(completedExecution.getStatus()).isEqualTo(AgentExecutionStatus.SUCCESS);
         assertThat(completedExecution.getOutputPayload()).contains(proposalId.toString());
@@ -108,13 +113,7 @@ class RuleBasedSchedulingAgentTest {
     void runFailsExecutionWhenNoAgronomistIsAvailable() {
         LocalDate scheduleDate = LocalDate.of(2026, 5, 9);
 
-        when(agentExecutionRepository.save(any(AgentExecution.class))).thenAnswer(invocation -> {
-            AgentExecution execution = invocation.getArgument(0);
-            if (execution.getId() == null) {
-                execution.prePersist();
-            }
-            return execution;
-        });
+        mockAgentExecutionPersistence();
         when(fieldTaskRepository.findUnassignedTasksByDistrictAndDueDate("Aceh Besar", scheduleDate))
                 .thenReturn(List.of(fieldTask(TaskPriority.CRITICAL, scheduleDate)));
         when(agronomistRepository.findByAssignedDistrictAndAvailabilityStatus("Aceh Besar", AvailabilityStatus.AVAILABLE))
@@ -129,14 +128,69 @@ class RuleBasedSchedulingAgentTest {
         assertThat(response.proposalId()).isNull();
         assertThat(response.status()).isEqualTo(AgentExecutionStatus.FAILED.name());
         assertThat(response.message()).isEqualTo("No available agronomist found for district Aceh Besar");
+        assertThat(transactionManager.commits()).isZero();
+        assertThat(transactionManager.rollbacks()).isEqualTo(1);
         verify(agentProposalRepository, never()).save(any(AgentProposal.class));
         verify(agentProposalItemRepository, never()).save(any(AgentProposalItem.class));
 
         ArgumentCaptor<AgentExecution> executionCaptor = ArgumentCaptor.forClass(AgentExecution.class);
-        verify(agentExecutionRepository, org.mockito.Mockito.times(2)).save(executionCaptor.capture());
+        verify(agentExecutionRepository, times(2)).save(executionCaptor.capture());
         AgentExecution failedExecution = executionCaptor.getAllValues().getLast();
         assertThat(failedExecution.getStatus()).isEqualTo(AgentExecutionStatus.FAILED);
         assertThat(failedExecution.getErrorMessage()).isEqualTo("No available agronomist found for district Aceh Besar");
+    }
+
+    @Test
+    void runRollsBackProposalTransactionAndStoresFailedExecutionWhenProposalItemSaveFails() {
+        LocalDate scheduleDate = LocalDate.of(2026, 5, 9);
+        FieldTask criticalTask = fieldTask(TaskPriority.CRITICAL, scheduleDate);
+        Agronomist agronomist = agronomist("Dewi Lestari", "Aceh Besar", 1);
+        UUID proposalId = UUID.randomUUID();
+
+        mockAgentExecutionPersistence();
+        when(fieldTaskRepository.findUnassignedTasksByDistrictAndDueDate("Aceh Besar", scheduleDate))
+                .thenReturn(List.of(criticalTask));
+        when(agronomistRepository.findByAssignedDistrictAndAvailabilityStatus("Aceh Besar", AvailabilityStatus.AVAILABLE))
+                .thenReturn(List.of(agronomist));
+        when(agentProposalRepository.save(any(AgentProposal.class))).thenAnswer(invocation -> {
+            AgentProposal proposal = invocation.getArgument(0);
+            setPersistedTimestamps(proposal, proposalId);
+            return proposal;
+        });
+        when(agentProposalItemRepository.save(any(AgentProposalItem.class)))
+                .thenThrow(new IllegalStateException("proposal item insert failed"));
+
+        RunSchedulingAgentResponse response = schedulingAgent().run(new RunSchedulingAgentRequest(
+                "Aceh Besar",
+                scheduleDate
+        ));
+
+        assertThat(response.executionId()).isNotNull();
+        assertThat(response.proposalId()).isNull();
+        assertThat(response.status()).isEqualTo(AgentExecutionStatus.FAILED.name());
+        assertThat(response.message()).isEqualTo("proposal item insert failed");
+        assertThat(transactionManager.commits()).isZero();
+        assertThat(transactionManager.rollbacks()).isEqualTo(1);
+        assertThat(criticalTask.getStatus()).isEqualTo(TaskStatus.CREATED);
+        verify(fieldTaskRepository, never()).save(criticalTask);
+
+        ArgumentCaptor<AgentExecution> executionCaptor = ArgumentCaptor.forClass(AgentExecution.class);
+        verify(agentExecutionRepository, times(2)).save(executionCaptor.capture());
+        AgentExecution failedExecution = executionCaptor.getAllValues().getLast();
+        assertThat(failedExecution.getStatus()).isEqualTo(AgentExecutionStatus.FAILED);
+        assertThat(failedExecution.getErrorMessage()).isEqualTo("proposal item insert failed");
+    }
+
+    private void mockAgentExecutionPersistence() {
+        when(agentExecutionRepository.save(any(AgentExecution.class))).thenAnswer(invocation -> {
+            AgentExecution execution = invocation.getArgument(0);
+            if (execution.getId() == null) {
+                execution.prePersist();
+            }
+            savedExecution.set(execution);
+            return execution;
+        });
+        when(agentExecutionRepository.findById(any(UUID.class))).thenAnswer(invocation -> Optional.of(savedExecution.get()));
     }
 
     private FieldTask fieldTask(TaskPriority priority, LocalDate dueDate) {
@@ -177,12 +231,46 @@ class RuleBasedSchedulingAgentTest {
 
     private RuleBasedSchedulingAgent schedulingAgent() {
         return new RuleBasedSchedulingAgent(
-                agentExecutionRepository,
+                new AgentExecutionService(agentExecutionRepository),
                 fieldTaskRepository,
                 agronomistRepository,
                 agentProposalRepository,
                 agentProposalItemRepository,
-                objectMapper
+                objectMapper,
+                transactionManager
         );
+    }
+
+    private static class RecordingTransactionManager extends AbstractPlatformTransactionManager {
+
+        private int commits;
+        private int rollbacks;
+
+        int commits() {
+            return commits;
+        }
+
+        int rollbacks() {
+            return rollbacks;
+        }
+
+        @Override
+        protected Object doGetTransaction() {
+            return new Object();
+        }
+
+        @Override
+        protected void doBegin(Object transaction, TransactionDefinition definition) {
+        }
+
+        @Override
+        protected void doCommit(DefaultTransactionStatus status) {
+            commits++;
+        }
+
+        @Override
+        protected void doRollback(DefaultTransactionStatus status) {
+            rollbacks++;
+        }
     }
 }

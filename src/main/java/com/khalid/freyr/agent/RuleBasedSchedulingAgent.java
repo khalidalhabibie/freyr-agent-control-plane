@@ -15,11 +15,11 @@ import com.khalid.freyr.fieldtask.FieldTask;
 import com.khalid.freyr.fieldtask.FieldTaskRepository;
 import com.khalid.freyr.fieldtask.TaskPriority;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
-import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -38,110 +38,121 @@ public class RuleBasedSchedulingAgent implements SchedulingAgent {
     private static final String PROPOSAL_TYPE = "FIELD_TASK_ASSIGNMENT";
     private static final String SUCCESS_MESSAGE = "Scheduling proposal has been generated and requires approval";
 
-    private final AgentExecutionRepository agentExecutionRepository;
+    private final AgentExecutionService agentExecutionService;
     private final FieldTaskRepository fieldTaskRepository;
     private final AgronomistRepository agronomistRepository;
     private final AgentProposalRepository agentProposalRepository;
     private final AgentProposalItemRepository agentProposalItemRepository;
     private final ObjectMapper objectMapper;
+    private final TransactionTemplate transactionTemplate;
 
     public RuleBasedSchedulingAgent(
-            AgentExecutionRepository agentExecutionRepository,
+            AgentExecutionService agentExecutionService,
             FieldTaskRepository fieldTaskRepository,
             AgronomistRepository agronomistRepository,
             AgentProposalRepository agentProposalRepository,
             AgentProposalItemRepository agentProposalItemRepository,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            PlatformTransactionManager transactionManager
     ) {
-        this.agentExecutionRepository = agentExecutionRepository;
+        this.agentExecutionService = agentExecutionService;
         this.fieldTaskRepository = fieldTaskRepository;
         this.agronomistRepository = agronomistRepository;
         this.agentProposalRepository = agentProposalRepository;
         this.agentProposalItemRepository = agentProposalItemRepository;
         this.objectMapper = objectMapper;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
     @Override
-    @Transactional
     public RunSchedulingAgentResponse run(RunSchedulingAgentRequest request) {
-        AgentExecution execution = agentExecutionRepository.save(new AgentExecution(
+        AgentExecution execution = agentExecutionService.createRunningExecution(
                 AGENT_NAME,
                 EXECUTION_TYPE,
                 toJson(Map.of("district", request.district(), "scheduleDate", request.scheduleDate())),
-                null,
-                AgentExecutionStatus.RUNNING,
                 MODEL_NAME,
-                PROMPT_VERSION,
-                null,
-                Instant.now(),
-                null
-        ));
+                PROMPT_VERSION
+        );
 
         try {
-            List<FieldTask> tasks = fieldTaskRepository.findUnassignedTasksByDistrictAndDueDate(
-                    request.district(),
-                    request.scheduleDate()
-            );
-            List<Agronomist> agronomists = agronomistRepository.findByAssignedDistrictAndAvailabilityStatus(
-                    request.district(),
-                    AvailabilityStatus.AVAILABLE
-            );
-
-            if (agronomists.isEmpty()) {
-                return failExecution(execution, "No available agronomist found for district " + request.district());
-            }
-
-            List<RecommendedAssignment> assignments = recommendAssignments(tasks, agronomists, request.scheduleDate());
-            AgentProposal proposal = agentProposalRepository.save(new AgentProposal(
+            SchedulingProposalResult result = transactionTemplate.execute(status -> createProposal(
                     execution.getId(),
-                    PROPOSAL_TYPE,
-                    AgentProposalStatus.PENDING_APPROVAL,
-                    request.district(),
-                    request.scheduleDate(),
-                    "Generated " + assignments.size() + " scheduling recommendation(s)"
+                    request
             ));
 
-            for (RecommendedAssignment assignment : assignments) {
-                agentProposalItemRepository.save(new AgentProposalItem(
-                        proposal.getId(),
-                        assignment.task().getId(),
-                        assignment.agronomist().getId(),
-                        assignment.reason(),
-                        assignment.confidenceScore(),
-                        AgentProposalItemStatus.PROPOSED
-                ));
-                assignment.task().markProposed();
-                fieldTaskRepository.save(assignment.task());
-            }
-
-            execution.markSuccess(toJson(Map.of(
-                    "proposalId", proposal.getId(),
-                    "recommendedAssignments", assignments.size(),
+            agentExecutionService.markSuccess(execution.getId(), toJson(Map.of(
+                    "proposalId", result.proposalId(),
+                    "recommendedAssignments", result.recommendedAssignments(),
                     "district", request.district(),
                     "scheduleDate", request.scheduleDate()
             )));
-            agentExecutionRepository.save(execution);
 
             return new RunSchedulingAgentResponse(
                     execution.getId(),
-                    proposal.getId(),
+                    result.proposalId(),
                     AgentProposalStatus.PENDING_APPROVAL.name(),
                     SUCCESS_MESSAGE
             );
         } catch (RuntimeException exception) {
-            return failExecution(execution, exception.getMessage());
+            String message = failureMessage(exception);
+            agentExecutionService.markFailed(execution.getId(), message);
+            return new RunSchedulingAgentResponse(
+                    execution.getId(),
+                    null,
+                    AgentExecutionStatus.FAILED.name(),
+                    message
+            );
         }
     }
 
-    private RunSchedulingAgentResponse failExecution(AgentExecution execution, String message) {
-        execution.markFailed(message);
-        agentExecutionRepository.save(execution);
-        return new RunSchedulingAgentResponse(
-                execution.getId(),
-                null,
-                AgentExecutionStatus.FAILED.name(),
-                message
+    private SchedulingProposalResult createProposal(UUID executionId, RunSchedulingAgentRequest request) {
+        List<FieldTask> tasks = fieldTaskRepository.findUnassignedTasksByDistrictAndDueDate(
+                request.district(),
+                request.scheduleDate()
         );
+        List<Agronomist> agronomists = agronomistRepository.findByAssignedDistrictAndAvailabilityStatus(
+                request.district(),
+                AvailabilityStatus.AVAILABLE
+        );
+
+        if (agronomists.isEmpty()) {
+            throw new SchedulingAgentException("No available agronomist found for district " + request.district());
+        }
+
+        List<RecommendedAssignment> assignments = recommendAssignments(tasks, agronomists, request.scheduleDate());
+        AgentProposal proposal = agentProposalRepository.save(new AgentProposal(
+                executionId,
+                PROPOSAL_TYPE,
+                AgentProposalStatus.PENDING_APPROVAL,
+                request.district(),
+                request.scheduleDate(),
+                "Generated " + assignments.size() + " scheduling recommendation(s)"
+        ));
+
+        for (RecommendedAssignment assignment : assignments) {
+            agentProposalItemRepository.save(new AgentProposalItem(
+                    proposal.getId(),
+                    assignment.task().getId(),
+                    assignment.agronomist().getId(),
+                    assignment.reason(),
+                    assignment.confidenceScore(),
+                    AgentProposalItemStatus.PROPOSED
+            ));
+            assignment.task().markProposed();
+            fieldTaskRepository.save(assignment.task());
+        }
+
+        return new SchedulingProposalResult(
+                proposal.getId(),
+                assignments.size()
+        );
+    }
+
+    private static String failureMessage(RuntimeException exception) {
+        if (exception.getMessage() == null || exception.getMessage().isBlank()) {
+            return "Scheduling agent failed";
+        }
+        return exception.getMessage();
     }
 
     private List<RecommendedAssignment> recommendAssignments(
@@ -239,5 +250,18 @@ public class RuleBasedSchedulingAgent implements SchedulingAgent {
             String reason,
             BigDecimal confidenceScore
     ) {
+    }
+
+    private record SchedulingProposalResult(
+            UUID proposalId,
+            int recommendedAssignments
+    ) {
+    }
+
+    private static class SchedulingAgentException extends RuntimeException {
+
+        SchedulingAgentException(String message) {
+            super(message);
+        }
     }
 }
