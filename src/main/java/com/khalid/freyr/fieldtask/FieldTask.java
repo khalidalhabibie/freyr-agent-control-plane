@@ -105,6 +105,16 @@ public class FieldTask {
         this.completedAt = completedAt;
     }
 
+    public void markAssigned(UUID agronomistId) {
+        this.assignedAgronomistId = agronomistId;
+        this.status = TaskStatus.ASSIGNED;
+    }
+
+    public void markCreated() {
+        this.assignedAgronomistId = null;
+        this.status = TaskStatus.CREATED;
+    }
+
     public UUID getId() {
         return id;
     }
