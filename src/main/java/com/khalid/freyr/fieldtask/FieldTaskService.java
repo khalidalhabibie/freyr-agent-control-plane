@@ -76,7 +76,10 @@ public class FieldTaskService {
 
     @Transactional(readOnly = true)
     public List<FieldTaskResponse> getUnassignedTasksByDistrictAndDueDate(String district, LocalDate dueDate) {
-        return fieldTaskRepository.findUnassignedTasksByDistrictAndDueDate(district, dueDate)
+        return fieldTaskRepository.findEligibleUnassignedTasksByDistrictAndDueDateWindow(
+                        district,
+                        dueDate.plusDays(1)
+                )
                 .stream()
                 .map(this::toResponse)
                 .toList();

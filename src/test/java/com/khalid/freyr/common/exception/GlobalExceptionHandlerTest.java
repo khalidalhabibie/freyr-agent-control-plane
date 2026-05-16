@@ -6,6 +6,7 @@ import jakarta.validation.constraints.NotBlank;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.validation.beanvalidation.LocalValidatorFactoryBean;
@@ -71,6 +72,15 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
+    void returnsConflictForOptimisticLockFailures() throws Exception {
+        mockMvc.perform(get("/test/optimistic-lock"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.status").value("CONFLICT"))
+                .andExpect(jsonPath("$.message").value("Agent proposal was already modified; refresh and retry"))
+                .andExpect(jsonPath("$.timestamp").exists());
+    }
+
+    @Test
     void returnsInternalServerErrorForUnhandledExceptions() throws Exception {
         mockMvc.perform(get("/test/error"))
                 .andExpect(status().isInternalServerError())
@@ -95,6 +105,11 @@ class GlobalExceptionHandlerTest {
         @GetMapping("/bad-request")
         void badRequest() {
             throw new IllegalArgumentException("Invalid request");
+        }
+
+        @GetMapping("/optimistic-lock")
+        void optimisticLock() {
+            throw new ObjectOptimisticLockingFailureException(Object.class, "proposal-001");
         }
 
         @GetMapping("/error")

@@ -247,7 +247,7 @@ class FieldTaskServiceTest {
                 null
         );
 
-        when(fieldTaskRepository.findUnassignedTasksByDistrictAndDueDate(district, dueDate))
+        when(fieldTaskRepository.findEligibleUnassignedTasksByDistrictAndDueDateWindow(district, dueDate.plusDays(1)))
                 .thenReturn(List.of(fieldTask));
 
         List<FieldTaskResponse> responses = fieldTaskService.getUnassignedTasksByDistrictAndDueDate(district, dueDate);
@@ -255,7 +255,7 @@ class FieldTaskServiceTest {
         assertThat(responses).hasSize(1);
         assertThat(responses.getFirst().taskType()).isEqualTo(TaskType.PEST_INSPECTION);
         assertThat(responses.getFirst().assignedAgronomistId()).isNull();
-        verify(fieldTaskRepository).findUnassignedTasksByDistrictAndDueDate(district, dueDate);
+        verify(fieldTaskRepository).findEligibleUnassignedTasksByDistrictAndDueDateWindow(district, dueDate.plusDays(1));
     }
 
     private UpdateFieldTaskRequest updateRequest(UUID farmFieldId) {

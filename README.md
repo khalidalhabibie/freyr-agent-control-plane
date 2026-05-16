@@ -4,13 +4,9 @@ Freyr Agent Control Plane is a Spring Boot backend for an AI-assisted agricultur
 field operations control plane.
 
 The system is designed around safe orchestration rather than direct autonomous
-execution. An agent will generate operational proposals for field work, a human
-manager will approve, reject, or override those proposals, and only approved
-decisions will result in task assignments.
-
-This initial version contains only the project structure, runtime configuration,
-PostgreSQL wiring, Flyway setup, and Swagger/OpenAPI support. Business modules
-are intentionally not implemented yet.
+execution. An agent generates operational proposals for field work, a human
+manager approves, rejects, or overrides those proposals, and only approved
+decisions result in task assignments.
 
 ## Tech Stack
 
@@ -80,3 +76,121 @@ The OpenAPI JSON is available at:
 ```text
 http://localhost:8080/v3/api-docs
 ```
+
+## Sample API Payloads
+
+Create farmer: `POST /api/v1/farmers`
+
+```json
+{
+  "name": "Pak Budi",
+  "phoneNumber": "08123456789",
+  "village": "Lamteh",
+  "district": "Aceh Besar"
+}
+```
+
+Create farm field: `POST /api/v1/fields`
+
+```json
+{
+  "farmerId": "11111111-1111-1111-1111-111111111111",
+  "areaName": "North Block",
+  "areaSize": 2.5,
+  "cropStage": "VEGETATIVE",
+  "waterStatus": "WET",
+  "pestReported": false
+}
+```
+
+Create agronomist: `POST /api/v1/agronomists`
+
+```json
+{
+  "name": "Sari",
+  "phoneNumber": "08129876543",
+  "assignedDistrict": "Aceh Besar",
+  "maxDailyVisit": 4,
+  "availabilityStatus": "AVAILABLE"
+}
+```
+
+Create field task: `POST /api/v1/field-tasks`
+
+```json
+{
+  "farmFieldId": "22222222-2222-2222-2222-222222222222",
+  "taskType": "WATER_LEVEL_CHECK",
+  "priority": "HIGH",
+  "status": "CREATED",
+  "dueDate": "2026-05-20"
+}
+```
+
+Run scheduling agent: planned `POST /api/v1/agent/scheduling-runs`
+
+```json
+{
+  "district": "Aceh Besar",
+  "scheduleDate": "2026-05-20"
+}
+```
+
+Approve proposal: `POST /api/v1/agent-proposals/{proposalId}/approve`
+
+```json
+{
+  "reviewedBy": "manager-001",
+  "note": "Approved for tomorrow visits"
+}
+```
+
+Reject proposal: `POST /api/v1/agent-proposals/{proposalId}/reject`
+
+```json
+{
+  "reviewedBy": "manager-001",
+  "reason": "Schedule is no longer valid"
+}
+```
+
+Override proposal: `POST /api/v1/agent-proposals/{proposalId}/override`
+
+```json
+{
+  "reviewedBy": "manager-001",
+  "reason": "Original agronomist is unavailable",
+  "overrides": [
+    {
+      "proposalItemId": "33333333-3333-3333-3333-333333333333",
+      "newAgronomistId": "44444444-4444-4444-4444-444444444444"
+    }
+  ]
+}
+```
+
+## Domain Boundaries
+
+Farmers, farm fields, agronomists, field tasks, proposals, and assignments are
+separate aggregate boundaries. Entities store UUID references instead of direct
+JPA object graphs so each aggregate can evolve independently, service methods
+can control consistency explicitly, and future asynchronous workflows can pass
+stable identifiers through queues or external agent systems.
+
+## Production Notes
+
+- Transaction handling: approval operations run in transactions so proposal
+  state, proposal items, task assignments, field task updates, and approval
+  history are committed together.
+- Approval concurrency: production deployments should add optimistic locking or
+  row-level locking around proposals so two managers cannot approve or override
+  the same pending proposal concurrently.
+- Duplicate assignment protection: approval checks for an existing active
+  assignment before creating another one, and PostgreSQL enforces one active
+  assignment per field task with a partial unique index.
+- Stale proposal validation: before approval, compare proposal items against the
+  current task status, agronomist availability, capacity, and schedule window so
+  old agent recommendations cannot assign invalid work.
+- Future integrations: RabbitMQ can carry agent jobs/events, Redis can cache
+  short-lived scheduling context or locks, and OpenAI integration can generate
+  proposal recommendations while keeping human approval as the execution gate.

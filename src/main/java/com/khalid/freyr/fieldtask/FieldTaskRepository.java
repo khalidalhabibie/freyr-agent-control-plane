@@ -1,7 +1,5 @@
 package com.khalid.freyr.fieldtask;
 
-import com.khalid.freyr.farmer.Farmer;
-import com.khalid.freyr.farmfield.FarmField;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -19,11 +17,20 @@ public interface FieldTaskRepository extends JpaRepository<FieldTask, UUID> {
             join Farmer farmer on farmer.id = field.farmerId
             where task.assignedAgronomistId is null
               and farmer.district = :district
-              and task.dueDate = :dueDate
-            order by task.priority desc, task.createdAt asc
+              and task.status = com.khalid.freyr.fieldtask.TaskStatus.CREATED
+              and task.dueDate <= :dueDateCutoff
+            order by
+              case task.priority
+                when com.khalid.freyr.fieldtask.TaskPriority.CRITICAL then 4
+                when com.khalid.freyr.fieldtask.TaskPriority.HIGH then 3
+                when com.khalid.freyr.fieldtask.TaskPriority.MEDIUM then 2
+                when com.khalid.freyr.fieldtask.TaskPriority.LOW then 1
+              end desc,
+              task.dueDate asc,
+              task.createdAt asc
             """)
-    List<FieldTask> findUnassignedTasksByDistrictAndDueDate(
+    List<FieldTask> findEligibleUnassignedTasksByDistrictAndDueDateWindow(
             @Param("district") String district,
-            @Param("dueDate") LocalDate dueDate
+            @Param("dueDateCutoff") LocalDate dueDateCutoff
     );
 }
