@@ -5,12 +5,15 @@ import com.khalid.freyr.agronomist.AgronomistRepository;
 import com.khalid.freyr.agronomist.AvailabilityStatus;
 import com.khalid.freyr.assignment.TaskAssignment;
 import com.khalid.freyr.assignment.TaskAssignmentRepository;
+import com.khalid.freyr.assignment.TaskAssignmentStatus;
 import com.khalid.freyr.fieldtask.FieldTask;
 import com.khalid.freyr.fieldtask.FieldTaskRepository;
+import com.khalid.freyr.fieldtask.TaskStatus;
 import jakarta.persistence.EntityNotFoundException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDate;
 import java.util.List;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -67,7 +70,9 @@ public class AgentApprovalService {
         AgentProposal proposal = getPendingProposal(proposalId);
         List<AgentProposalItem> items = agentProposalItemRepository.findByProposalId(proposalId);
 
+        validateProposalIsFresh(proposal, items);
         validateAgronomistAvailabilityAndCapacity(proposal, items);
+        validateNoActiveAssignments(items);
 
         proposal.markApproved();
         agentProposalRepository.save(proposal);
@@ -116,7 +121,9 @@ public class AgentApprovalService {
                 ));
 
         validateOverrideItemsBelongToProposal(items, overrides);
-        validateOverrideAgronomistsExist(overrides);
+        validateProposalIsFresh(proposal, items);
+        validateOverrideAgronomistAvailabilityAndCapacity(proposal, items, overrides);
+        validateNoActiveAssignments(items);
 
         proposal.markOverridden();
         agentProposalRepository.save(proposal);
@@ -158,7 +165,52 @@ public class AgentApprovalService {
         }
     }
 
+    private void validateNoActiveAssignments(List<AgentProposalItem> items) {
+        for (AgentProposalItem item : items) {
+            if (hasActiveAssignment(item.getFieldTaskId())) {
+                throw new IllegalArgumentException(
+                        "Field task already has an active assignment: " + item.getFieldTaskId()
+                );
+            }
+        }
+    }
+
+    private void validateProposalIsFresh(AgentProposal proposal, List<AgentProposalItem> items) {
+        if (proposal.getScheduleDate().isBefore(LocalDate.now())) {
+            throw new IllegalArgumentException(
+                    "Agent proposal schedule date is in the past: " + proposal.getScheduleDate()
+            );
+        }
+
+        for (AgentProposalItem item : items) {
+            FieldTask fieldTask = getFieldTask(item.getFieldTaskId());
+            validateFieldTaskIsStillProposed(fieldTask);
+        }
+    }
+
+    private void validateFieldTaskIsStillProposed(FieldTask fieldTask) {
+        if (fieldTask.getAssignedAgronomistId() != null || fieldTask.getStatus() == TaskStatus.ASSIGNED) {
+            throw new IllegalArgumentException("Field task is already assigned: " + fieldTask.getId());
+        }
+
+        if (fieldTask.getStatus() == TaskStatus.COMPLETED) {
+            throw new IllegalArgumentException("Field task is already completed: " + fieldTask.getId());
+        }
+
+        if (fieldTask.getStatus() == TaskStatus.CANCELLED) {
+            throw new IllegalArgumentException("Field task is cancelled: " + fieldTask.getId());
+        }
+
+        if (fieldTask.getStatus() != TaskStatus.PROPOSED) {
+            throw new IllegalArgumentException("Field task is no longer proposed: " + fieldTask.getId());
+        }
+    }
+
     private void createAssignmentAndMarkTaskAssigned(UUID proposalId, AgentProposalItem item) {
+        if (hasActiveAssignment(item.getFieldTaskId())) {
+            throw new IllegalArgumentException("Field task already has an active assignment: " + item.getFieldTaskId());
+        }
+
         taskAssignmentRepository.save(new TaskAssignment(
                 item.getFieldTaskId(),
                 item.getRecommendedAgronomistId(),
@@ -170,16 +222,41 @@ public class AgentApprovalService {
         fieldTaskRepository.save(fieldTask);
     }
 
+    private boolean hasActiveAssignment(UUID fieldTaskId) {
+        return taskAssignmentRepository.existsByFieldTaskIdAndStatus(fieldTaskId, TaskAssignmentStatus.ACTIVE);
+    }
+
     private FieldTask getFieldTask(UUID fieldTaskId) {
         return fieldTaskRepository.findById(fieldTaskId)
-                .orElseThrow(() -> new EntityNotFoundException("Field task not found"));
+                .orElseThrow(() -> new EntityNotFoundException("Field task not found: " + fieldTaskId));
     }
 
     private void validateAgronomistAvailabilityAndCapacity(AgentProposal proposal, List<AgentProposalItem> items) {
+        validateAgronomistIdsAvailabilityAndCapacity(
+                proposal,
+                items.stream()
+                        .map(AgentProposalItem::getRecommendedAgronomistId)
+                        .toList()
+        );
+    }
+
+    private void validateOverrideAgronomistAvailabilityAndCapacity(
+            AgentProposal proposal,
+            List<AgentProposalItem> items,
+            Map<UUID, UUID> overrides
+    ) {
+        validateAgronomistIdsAvailabilityAndCapacity(
+                proposal,
+                items.stream()
+                        .map(item -> overrides.getOrDefault(item.getId(), item.getRecommendedAgronomistId()))
+                        .toList()
+        );
+    }
+
+    private void validateAgronomistIdsAvailabilityAndCapacity(AgentProposal proposal, List<UUID> agronomistIds) {
         Map<UUID, Integer> proposedAssignmentCounts = new HashMap<>();
 
-        for (AgentProposalItem item : items) {
-            UUID agronomistId = item.getRecommendedAgronomistId();
+        for (UUID agronomistId : agronomistIds) {
             Agronomist agronomist = agronomistRepository.findById(agronomistId)
                     .orElseThrow(() -> new EntityNotFoundException("Agronomist not found"));
 
@@ -209,14 +286,6 @@ public class AgentApprovalService {
         for (UUID proposalItemId : overrides.keySet()) {
             if (!itemIds.contains(proposalItemId)) {
                 throw new EntityNotFoundException("Agent proposal item not found");
-            }
-        }
-    }
-
-    private void validateOverrideAgronomistsExist(Map<UUID, UUID> overrides) {
-        for (UUID agronomistId : overrides.values()) {
-            if (!agronomistRepository.existsById(agronomistId)) {
-                throw new EntityNotFoundException("Agronomist not found");
             }
         }
     }

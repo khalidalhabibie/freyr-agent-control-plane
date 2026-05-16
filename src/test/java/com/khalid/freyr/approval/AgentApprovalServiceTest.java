@@ -110,12 +110,16 @@ class AgentApprovalServiceTest {
 
         when(agentProposalRepository.findById(proposalId)).thenReturn(Optional.of(proposal));
         when(agentProposalItemRepository.findByProposalId(proposalId)).thenReturn(List.of(item));
+        when(fieldTaskRepository.findById(fieldTask.getId())).thenReturn(Optional.of(fieldTask));
         when(agronomistRepository.findById(agronomistId)).thenReturn(Optional.of(agronomist));
         when(taskAssignmentRepository.countActiveAssignmentsForAgronomistOnScheduleDate(
                 agronomistId,
                 proposal.getScheduleDate()
         )).thenReturn(1L);
-        when(fieldTaskRepository.findById(fieldTask.getId())).thenReturn(Optional.of(fieldTask));
+        when(taskAssignmentRepository.existsByFieldTaskIdAndStatus(
+                fieldTask.getId(),
+                TaskAssignmentStatus.ACTIVE
+        )).thenReturn(false);
 
         AgentProposalDetailResponse response = agentApprovalService.approveProposal(
                 proposalId,
@@ -145,6 +149,42 @@ class AgentApprovalServiceTest {
     }
 
     @Test
+    void approveProposalFailsWhenFieldTaskAlreadyHasActiveAssignment() {
+        UUID proposalId = UUID.randomUUID();
+        UUID agronomistId = UUID.randomUUID();
+        FieldTask fieldTask = fieldTask(TaskStatus.PROPOSED, null);
+        AgentProposal proposal = proposal(proposalId, AgentProposalStatus.PENDING_APPROVAL);
+        AgentProposalItem item = proposalItem(proposalId, fieldTask.getId(), agronomistId);
+        Agronomist agronomist = agronomist(agronomistId, AvailabilityStatus.AVAILABLE, 2);
+
+        when(agentProposalRepository.findById(proposalId)).thenReturn(Optional.of(proposal));
+        when(agentProposalItemRepository.findByProposalId(proposalId)).thenReturn(List.of(item));
+        when(fieldTaskRepository.findById(fieldTask.getId())).thenReturn(Optional.of(fieldTask));
+        when(agronomistRepository.findById(agronomistId)).thenReturn(Optional.of(agronomist));
+        when(taskAssignmentRepository.countActiveAssignmentsForAgronomistOnScheduleDate(
+                agronomistId,
+                proposal.getScheduleDate()
+        )).thenReturn(0L);
+        when(taskAssignmentRepository.existsByFieldTaskIdAndStatus(
+                fieldTask.getId(),
+                TaskAssignmentStatus.ACTIVE
+        )).thenReturn(true);
+
+        assertThatThrownBy(() -> agentApprovalService.approveProposal(
+                proposalId,
+                new ApproveAgentProposalRequest("manager-001", "Approved")
+        ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Field task already has an active assignment: " + fieldTask.getId());
+
+        assertThat(proposal.getStatus()).isEqualTo(AgentProposalStatus.PENDING_APPROVAL);
+        assertThat(item.getStatus()).isEqualTo(AgentProposalItemStatus.PROPOSED);
+        verify(taskAssignmentRepository, never()).save(any(TaskAssignment.class));
+        verify(fieldTaskRepository, never()).save(any(FieldTask.class));
+        verify(agentApprovalHistoryRepository, never()).save(any(AgentApprovalHistory.class));
+    }
+
+    @Test
     void approveProposalThrowsWhenRecommendedAgronomistIsUnavailable() {
         UUID proposalId = UUID.randomUUID();
         UUID agronomistId = UUID.randomUUID();
@@ -155,6 +195,7 @@ class AgentApprovalServiceTest {
 
         when(agentProposalRepository.findById(proposalId)).thenReturn(Optional.of(proposal));
         when(agentProposalItemRepository.findByProposalId(proposalId)).thenReturn(List.of(item));
+        when(fieldTaskRepository.findById(fieldTask.getId())).thenReturn(Optional.of(fieldTask));
         when(agronomistRepository.findById(agronomistId)).thenReturn(Optional.of(agronomist));
 
         assertThatThrownBy(() -> agentApprovalService.approveProposal(
@@ -183,6 +224,7 @@ class AgentApprovalServiceTest {
 
         when(agentProposalRepository.findById(proposalId)).thenReturn(Optional.of(proposal));
         when(agentProposalItemRepository.findByProposalId(proposalId)).thenReturn(List.of(item));
+        when(fieldTaskRepository.findById(fieldTask.getId())).thenReturn(Optional.of(fieldTask));
         when(agronomistRepository.findById(agronomistId)).thenReturn(Optional.of(agronomist));
         when(taskAssignmentRepository.countActiveAssignmentsForAgronomistOnScheduleDate(
                 agronomistId,
@@ -201,6 +243,115 @@ class AgentApprovalServiceTest {
         assertThat(fieldTask.getStatus()).isEqualTo(TaskStatus.PROPOSED);
         verify(taskAssignmentRepository, never()).save(any(TaskAssignment.class));
         verify(fieldTaskRepository, never()).save(any(FieldTask.class));
+        verify(agentApprovalHistoryRepository, never()).save(any(AgentApprovalHistory.class));
+    }
+
+    @Test
+    void approveProposalThrowsWhenFieldTaskIsAlreadyAssigned() {
+        UUID proposalId = UUID.randomUUID();
+        UUID agronomistId = UUID.randomUUID();
+        FieldTask fieldTask = fieldTask(TaskStatus.ASSIGNED, agronomistId);
+        AgentProposal proposal = proposal(proposalId, AgentProposalStatus.PENDING_APPROVAL);
+        AgentProposalItem item = proposalItem(proposalId, fieldTask.getId(), agronomistId);
+
+        when(agentProposalRepository.findById(proposalId)).thenReturn(Optional.of(proposal));
+        when(agentProposalItemRepository.findByProposalId(proposalId)).thenReturn(List.of(item));
+        when(fieldTaskRepository.findById(fieldTask.getId())).thenReturn(Optional.of(fieldTask));
+
+        assertThatThrownBy(() -> agentApprovalService.approveProposal(
+                proposalId,
+                new ApproveAgentProposalRequest("manager-001", "Approved")
+        ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Field task is already assigned: " + fieldTask.getId());
+
+        assertThat(proposal.getStatus()).isEqualTo(AgentProposalStatus.PENDING_APPROVAL);
+        assertThat(item.getStatus()).isEqualTo(AgentProposalItemStatus.PROPOSED);
+        verify(agronomistRepository, never()).findById(any(UUID.class));
+        verify(taskAssignmentRepository, never()).save(any(TaskAssignment.class));
+        verify(fieldTaskRepository, never()).save(any(FieldTask.class));
+        verify(agentApprovalHistoryRepository, never()).save(any(AgentApprovalHistory.class));
+    }
+
+    @Test
+    void approveProposalThrowsWhenFieldTaskIsCompleted() {
+        UUID proposalId = UUID.randomUUID();
+        UUID agronomistId = UUID.randomUUID();
+        FieldTask fieldTask = fieldTask(TaskStatus.COMPLETED, null);
+        AgentProposal proposal = proposal(proposalId, AgentProposalStatus.PENDING_APPROVAL);
+        AgentProposalItem item = proposalItem(proposalId, fieldTask.getId(), agronomistId);
+
+        when(agentProposalRepository.findById(proposalId)).thenReturn(Optional.of(proposal));
+        when(agentProposalItemRepository.findByProposalId(proposalId)).thenReturn(List.of(item));
+        when(fieldTaskRepository.findById(fieldTask.getId())).thenReturn(Optional.of(fieldTask));
+
+        assertThatThrownBy(() -> agentApprovalService.approveProposal(
+                proposalId,
+                new ApproveAgentProposalRequest("manager-001", "Approved")
+        ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Field task is already completed: " + fieldTask.getId());
+
+        assertThat(proposal.getStatus()).isEqualTo(AgentProposalStatus.PENDING_APPROVAL);
+        assertThat(item.getStatus()).isEqualTo(AgentProposalItemStatus.PROPOSED);
+        verify(agronomistRepository, never()).findById(any(UUID.class));
+        verify(taskAssignmentRepository, never()).save(any(TaskAssignment.class));
+        verify(fieldTaskRepository, never()).save(any(FieldTask.class));
+        verify(agentApprovalHistoryRepository, never()).save(any(AgentApprovalHistory.class));
+    }
+
+    @Test
+    void approveProposalThrowsWhenFieldTaskIsCancelled() {
+        UUID proposalId = UUID.randomUUID();
+        UUID agronomistId = UUID.randomUUID();
+        FieldTask fieldTask = fieldTask(TaskStatus.CANCELLED, null);
+        AgentProposal proposal = proposal(proposalId, AgentProposalStatus.PENDING_APPROVAL);
+        AgentProposalItem item = proposalItem(proposalId, fieldTask.getId(), agronomistId);
+
+        when(agentProposalRepository.findById(proposalId)).thenReturn(Optional.of(proposal));
+        when(agentProposalItemRepository.findByProposalId(proposalId)).thenReturn(List.of(item));
+        when(fieldTaskRepository.findById(fieldTask.getId())).thenReturn(Optional.of(fieldTask));
+
+        assertThatThrownBy(() -> agentApprovalService.approveProposal(
+                proposalId,
+                new ApproveAgentProposalRequest("manager-001", "Approved")
+        ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Field task is cancelled: " + fieldTask.getId());
+
+        assertThat(proposal.getStatus()).isEqualTo(AgentProposalStatus.PENDING_APPROVAL);
+        assertThat(item.getStatus()).isEqualTo(AgentProposalItemStatus.PROPOSED);
+        verify(agronomistRepository, never()).findById(any(UUID.class));
+        verify(taskAssignmentRepository, never()).save(any(TaskAssignment.class));
+        verify(fieldTaskRepository, never()).save(any(FieldTask.class));
+        verify(agentApprovalHistoryRepository, never()).save(any(AgentApprovalHistory.class));
+    }
+
+    @Test
+    void approveProposalThrowsWhenScheduleDateIsInThePast() {
+        UUID proposalId = UUID.randomUUID();
+        UUID agronomistId = UUID.randomUUID();
+        FieldTask fieldTask = fieldTask(TaskStatus.PROPOSED, null);
+        AgentProposal proposal = proposal(proposalId, AgentProposalStatus.PENDING_APPROVAL);
+        LocalDate pastScheduleDate = LocalDate.now().minusDays(1);
+        ReflectionTestUtils.setField(proposal, "scheduleDate", pastScheduleDate);
+        AgentProposalItem item = proposalItem(proposalId, fieldTask.getId(), agronomistId);
+
+        when(agentProposalRepository.findById(proposalId)).thenReturn(Optional.of(proposal));
+        when(agentProposalItemRepository.findByProposalId(proposalId)).thenReturn(List.of(item));
+
+        assertThatThrownBy(() -> agentApprovalService.approveProposal(
+                proposalId,
+                new ApproveAgentProposalRequest("manager-001", "Approved")
+        ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Agent proposal schedule date is in the past: " + pastScheduleDate);
+
+        assertThat(proposal.getStatus()).isEqualTo(AgentProposalStatus.PENDING_APPROVAL);
+        assertThat(item.getStatus()).isEqualTo(AgentProposalItemStatus.PROPOSED);
+        verify(fieldTaskRepository, never()).findById(fieldTask.getId());
+        verify(agronomistRepository, never()).findById(any(UUID.class));
+        verify(taskAssignmentRepository, never()).save(any(TaskAssignment.class));
         verify(agentApprovalHistoryRepository, never()).save(any(AgentApprovalHistory.class));
     }
 
@@ -247,7 +398,18 @@ class AgentApprovalServiceTest {
 
         when(agentProposalRepository.findById(proposalId)).thenReturn(Optional.of(proposal));
         when(agentProposalItemRepository.findByProposalId(proposalId)).thenReturn(List.of(item, unchangedItem));
-        when(agronomistRepository.existsById(newAgronomistId)).thenReturn(true);
+        when(agronomistRepository.findById(newAgronomistId))
+                .thenReturn(Optional.of(agronomist(newAgronomistId, AvailabilityStatus.AVAILABLE, 2)));
+        when(agronomistRepository.findById(unchangedAgronomistId))
+                .thenReturn(Optional.of(agronomist(unchangedAgronomistId, AvailabilityStatus.AVAILABLE, 2)));
+        when(taskAssignmentRepository.countActiveAssignmentsForAgronomistOnScheduleDate(
+                newAgronomistId,
+                proposal.getScheduleDate()
+        )).thenReturn(0L);
+        when(taskAssignmentRepository.countActiveAssignmentsForAgronomistOnScheduleDate(
+                unchangedAgronomistId,
+                proposal.getScheduleDate()
+        )).thenReturn(0L);
         when(fieldTaskRepository.findById(fieldTask.getId())).thenReturn(Optional.of(fieldTask));
         when(fieldTaskRepository.findById(unchangedFieldTask.getId())).thenReturn(Optional.of(unchangedFieldTask));
 
@@ -309,6 +471,164 @@ class AgentApprovalServiceTest {
     }
 
     @Test
+    void overrideProposalThrowsWhenTargetAgronomistIsUnavailable() {
+        UUID proposalId = UUID.randomUUID();
+        UUID originalAgronomistId = UUID.randomUUID();
+        UUID newAgronomistId = UUID.randomUUID();
+        FieldTask fieldTask = fieldTask(TaskStatus.PROPOSED, null);
+        AgentProposal proposal = proposal(proposalId, AgentProposalStatus.PENDING_APPROVAL);
+        AgentProposalItem item = proposalItem(proposalId, fieldTask.getId(), originalAgronomistId);
+
+        when(agentProposalRepository.findById(proposalId)).thenReturn(Optional.of(proposal));
+        when(agentProposalItemRepository.findByProposalId(proposalId)).thenReturn(List.of(item));
+        when(fieldTaskRepository.findById(fieldTask.getId())).thenReturn(Optional.of(fieldTask));
+        when(agronomistRepository.findById(newAgronomistId))
+                .thenReturn(Optional.of(agronomist(newAgronomistId, AvailabilityStatus.UNAVAILABLE, 2)));
+
+        assertThatThrownBy(() -> agentApprovalService.overrideProposal(
+                proposalId,
+                new OverrideAgentProposalRequest(
+                        "manager-001",
+                        "Use another agronomist",
+                        List.of(new OverrideAgentProposalItemRequest(item.getId(), newAgronomistId))
+                )
+        ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Agronomist is not available: " + newAgronomistId);
+
+        assertThat(proposal.getStatus()).isEqualTo(AgentProposalStatus.PENDING_APPROVAL);
+        assertThat(item.getRecommendedAgronomistId()).isEqualTo(originalAgronomistId);
+        assertThat(item.getStatus()).isEqualTo(AgentProposalItemStatus.PROPOSED);
+        verify(agentProposalRepository, never()).save(any(AgentProposal.class));
+        verify(agentProposalItemRepository, never()).save(any(AgentProposalItem.class));
+        verify(taskAssignmentRepository, never()).save(any(TaskAssignment.class));
+        verify(fieldTaskRepository, never()).save(any(FieldTask.class));
+        verify(agentApprovalHistoryRepository, never()).save(any(AgentApprovalHistory.class));
+    }
+
+    @Test
+    void overrideProposalThrowsWhenTargetAgronomistCapacityIsFull() {
+        UUID proposalId = UUID.randomUUID();
+        UUID originalAgronomistId = UUID.randomUUID();
+        UUID newAgronomistId = UUID.randomUUID();
+        FieldTask fieldTask = fieldTask(TaskStatus.PROPOSED, null);
+        AgentProposal proposal = proposal(proposalId, AgentProposalStatus.PENDING_APPROVAL);
+        AgentProposalItem item = proposalItem(proposalId, fieldTask.getId(), originalAgronomistId);
+
+        when(agentProposalRepository.findById(proposalId)).thenReturn(Optional.of(proposal));
+        when(agentProposalItemRepository.findByProposalId(proposalId)).thenReturn(List.of(item));
+        when(fieldTaskRepository.findById(fieldTask.getId())).thenReturn(Optional.of(fieldTask));
+        when(agronomistRepository.findById(newAgronomistId))
+                .thenReturn(Optional.of(agronomist(newAgronomistId, AvailabilityStatus.AVAILABLE, 1)));
+        when(taskAssignmentRepository.countActiveAssignmentsForAgronomistOnScheduleDate(
+                newAgronomistId,
+                proposal.getScheduleDate()
+        )).thenReturn(1L);
+
+        assertThatThrownBy(() -> agentApprovalService.overrideProposal(
+                proposalId,
+                new OverrideAgentProposalRequest(
+                        "manager-001",
+                        "Use another agronomist",
+                        List.of(new OverrideAgentProposalItemRequest(item.getId(), newAgronomistId))
+                )
+        ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Agronomist daily capacity is full: " + newAgronomistId);
+
+        assertThat(proposal.getStatus()).isEqualTo(AgentProposalStatus.PENDING_APPROVAL);
+        assertThat(item.getRecommendedAgronomistId()).isEqualTo(originalAgronomistId);
+        assertThat(item.getStatus()).isEqualTo(AgentProposalItemStatus.PROPOSED);
+        verify(agentProposalRepository, never()).save(any(AgentProposal.class));
+        verify(agentProposalItemRepository, never()).save(any(AgentProposalItem.class));
+        verify(taskAssignmentRepository, never()).save(any(TaskAssignment.class));
+        verify(fieldTaskRepository, never()).save(any(FieldTask.class));
+        verify(agentApprovalHistoryRepository, never()).save(any(AgentApprovalHistory.class));
+    }
+
+    @Test
+    void overrideProposalValidatesNonOverriddenProposalItemsToo() {
+        UUID proposalId = UUID.randomUUID();
+        UUID originalAgronomistId = UUID.randomUUID();
+        UUID newAgronomistId = UUID.randomUUID();
+        UUID unchangedAgronomistId = UUID.randomUUID();
+        FieldTask fieldTask = fieldTask(TaskStatus.PROPOSED, null);
+        FieldTask unchangedFieldTask = fieldTask(TaskStatus.PROPOSED, null);
+        AgentProposal proposal = proposal(proposalId, AgentProposalStatus.PENDING_APPROVAL);
+        AgentProposalItem item = proposalItem(proposalId, fieldTask.getId(), originalAgronomistId);
+        AgentProposalItem unchangedItem = proposalItem(proposalId, unchangedFieldTask.getId(), unchangedAgronomistId);
+
+        when(agentProposalRepository.findById(proposalId)).thenReturn(Optional.of(proposal));
+        when(agentProposalItemRepository.findByProposalId(proposalId)).thenReturn(List.of(item, unchangedItem));
+        when(fieldTaskRepository.findById(fieldTask.getId())).thenReturn(Optional.of(fieldTask));
+        when(fieldTaskRepository.findById(unchangedFieldTask.getId())).thenReturn(Optional.of(unchangedFieldTask));
+        when(agronomistRepository.findById(newAgronomistId))
+                .thenReturn(Optional.of(agronomist(newAgronomistId, AvailabilityStatus.AVAILABLE, 2)));
+        when(taskAssignmentRepository.countActiveAssignmentsForAgronomistOnScheduleDate(
+                newAgronomistId,
+                proposal.getScheduleDate()
+        )).thenReturn(0L);
+        when(agronomistRepository.findById(unchangedAgronomistId))
+                .thenReturn(Optional.of(agronomist(unchangedAgronomistId, AvailabilityStatus.UNAVAILABLE, 2)));
+
+        assertThatThrownBy(() -> agentApprovalService.overrideProposal(
+                proposalId,
+                new OverrideAgentProposalRequest(
+                        "manager-001",
+                        "Use another agronomist",
+                        List.of(new OverrideAgentProposalItemRequest(item.getId(), newAgronomistId))
+                )
+        ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Agronomist is not available: " + unchangedAgronomistId);
+
+        assertThat(proposal.getStatus()).isEqualTo(AgentProposalStatus.PENDING_APPROVAL);
+        assertThat(item.getRecommendedAgronomistId()).isEqualTo(originalAgronomistId);
+        assertThat(item.getStatus()).isEqualTo(AgentProposalItemStatus.PROPOSED);
+        assertThat(unchangedItem.getStatus()).isEqualTo(AgentProposalItemStatus.PROPOSED);
+        verify(agentProposalRepository, never()).save(any(AgentProposal.class));
+        verify(agentProposalItemRepository, never()).save(any(AgentProposalItem.class));
+        verify(taskAssignmentRepository, never()).save(any(TaskAssignment.class));
+        verify(fieldTaskRepository, never()).save(any(FieldTask.class));
+        verify(agentApprovalHistoryRepository, never()).save(any(AgentApprovalHistory.class));
+    }
+
+    @Test
+    void overrideProposalThrowsWhenFieldTaskIsStale() {
+        UUID proposalId = UUID.randomUUID();
+        UUID originalAgronomistId = UUID.randomUUID();
+        UUID newAgronomistId = UUID.randomUUID();
+        FieldTask fieldTask = fieldTask(TaskStatus.COMPLETED, null);
+        AgentProposal proposal = proposal(proposalId, AgentProposalStatus.PENDING_APPROVAL);
+        AgentProposalItem item = proposalItem(proposalId, fieldTask.getId(), originalAgronomistId);
+
+        when(agentProposalRepository.findById(proposalId)).thenReturn(Optional.of(proposal));
+        when(agentProposalItemRepository.findByProposalId(proposalId)).thenReturn(List.of(item));
+        when(fieldTaskRepository.findById(fieldTask.getId())).thenReturn(Optional.of(fieldTask));
+
+        assertThatThrownBy(() -> agentApprovalService.overrideProposal(
+                proposalId,
+                new OverrideAgentProposalRequest(
+                        "manager-001",
+                        "Use another agronomist",
+                        List.of(new OverrideAgentProposalItemRequest(item.getId(), newAgronomistId))
+                )
+        ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Field task is already completed: " + fieldTask.getId());
+
+        assertThat(proposal.getStatus()).isEqualTo(AgentProposalStatus.PENDING_APPROVAL);
+        assertThat(item.getRecommendedAgronomistId()).isEqualTo(originalAgronomistId);
+        assertThat(item.getStatus()).isEqualTo(AgentProposalItemStatus.PROPOSED);
+        verify(agronomistRepository, never()).findById(any(UUID.class));
+        verify(agentProposalRepository, never()).save(any(AgentProposal.class));
+        verify(agentProposalItemRepository, never()).save(any(AgentProposalItem.class));
+        verify(taskAssignmentRepository, never()).save(any(TaskAssignment.class));
+        verify(fieldTaskRepository, never()).save(any(FieldTask.class));
+        verify(agentApprovalHistoryRepository, never()).save(any(AgentApprovalHistory.class));
+    }
+
+    @Test
     void overrideProposalThrowsClearValidationErrorForDuplicateProposalItemOverrides() {
         UUID proposalId = UUID.randomUUID();
         UUID originalAgronomistId = UUID.randomUUID();
@@ -337,7 +657,7 @@ class AgentApprovalServiceTest {
 
         assertThat(proposal.getStatus()).isEqualTo(AgentProposalStatus.PENDING_APPROVAL);
         assertThat(item.getStatus()).isEqualTo(AgentProposalItemStatus.PROPOSED);
-        verify(agronomistRepository, never()).existsById(any(UUID.class));
+        verify(agronomistRepository, never()).findById(any(UUID.class));
         verify(agentProposalRepository, never()).save(any(AgentProposal.class));
         verify(agentProposalItemRepository, never()).save(any(AgentProposalItem.class));
         verify(taskAssignmentRepository, never()).save(any(TaskAssignment.class));
@@ -364,16 +684,55 @@ class AgentApprovalServiceTest {
         verify(agentApprovalHistoryRepository, never()).save(any(AgentApprovalHistory.class));
     }
 
+    @Test
+    void proposalCannotBeApprovedTwice() {
+        UUID proposalId = UUID.randomUUID();
+        AgentProposal proposal = proposal(proposalId, AgentProposalStatus.APPROVED);
+
+        when(agentProposalRepository.findById(proposalId)).thenReturn(Optional.of(proposal));
+
+        assertThatThrownBy(() -> agentApprovalService.approveProposal(
+                proposalId,
+                new ApproveAgentProposalRequest("manager-002", "Approve again")
+        ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Agent proposal is not pending approval");
+
+        verify(agentProposalItemRepository, never()).findByProposalId(proposalId);
+        verify(taskAssignmentRepository, never()).save(any(TaskAssignment.class));
+        verify(agentApprovalHistoryRepository, never()).save(any(AgentApprovalHistory.class));
+    }
+
+    @Test
+    void rejectProposalThrowsWhenProposalIsAlreadyApproved() {
+        UUID proposalId = UUID.randomUUID();
+        AgentProposal proposal = proposal(proposalId, AgentProposalStatus.APPROVED);
+
+        when(agentProposalRepository.findById(proposalId)).thenReturn(Optional.of(proposal));
+
+        assertThatThrownBy(() -> agentApprovalService.rejectProposal(
+                proposalId,
+                new RejectAgentProposalRequest("manager-002", "Reject after approval")
+        ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Agent proposal is not pending approval");
+
+        verify(agentProposalItemRepository, never()).findByProposalId(proposalId);
+        verify(taskAssignmentRepository, never()).save(any(TaskAssignment.class));
+        verify(agentApprovalHistoryRepository, never()).save(any(AgentApprovalHistory.class));
+    }
+
     private AgentProposal proposal(UUID id, AgentProposalStatus status) {
         AgentProposal proposal = new AgentProposal(
                 UUID.randomUUID(),
                 "FIELD_TASK_ASSIGNMENT",
                 status,
                 "Aceh Besar",
-                LocalDate.of(2026, 5, 9),
+                LocalDate.now().plusDays(1),
                 "Generated scheduling recommendations"
         );
         ReflectionTestUtils.setField(proposal, "id", id);
+        ReflectionTestUtils.setField(proposal, "version", 0L);
         ReflectionTestUtils.setField(proposal, "createdAt", Instant.now());
         ReflectionTestUtils.setField(proposal, "updatedAt", Instant.now());
         return proposal;
@@ -400,7 +759,7 @@ class AgentApprovalServiceTest {
                 TaskType.WATER_LEVEL_CHECK,
                 TaskPriority.HIGH,
                 status,
-                LocalDate.of(2026, 5, 9),
+                LocalDate.now().plusDays(1),
                 assignedAgronomistId,
                 null
         );

@@ -185,6 +185,9 @@ stable identifiers through queues or external agent systems.
 - Approval concurrency: production deployments should add optimistic locking or
   row-level locking around proposals so two managers cannot approve or override
   the same pending proposal concurrently.
+- Duplicate assignment protection: approval checks for an existing active
+  assignment before creating another one, and PostgreSQL enforces one active
+  assignment per field task with a partial unique index.
 - Stale proposal validation: before approval, compare proposal items against the
   current task status, agronomist availability, capacity, and schedule window so
   old agent recommendations cannot assign invalid work.

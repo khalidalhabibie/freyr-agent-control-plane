@@ -9,6 +9,8 @@ import java.util.UUID;
 
 public interface TaskAssignmentRepository extends JpaRepository<TaskAssignment, UUID> {
 
+    boolean existsByFieldTaskIdAndStatus(UUID fieldTaskId, TaskAssignmentStatus status);
+
     @Query("""
             select count(assignment)
             from TaskAssignment assignment

@@ -110,6 +110,10 @@ public class FieldTask {
         this.status = TaskStatus.ASSIGNED;
     }
 
+    public void markProposed() {
+        this.status = TaskStatus.PROPOSED;
+    }
+
     public void markCreated() {
         this.assignedAgronomistId = null;
         this.status = TaskStatus.CREATED;

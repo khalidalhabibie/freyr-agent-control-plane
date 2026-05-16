@@ -2,10 +2,12 @@ package com.khalid.freyr.common.exception;
 
 import com.khalid.freyr.common.response.ErrorResponse;
 import jakarta.persistence.EntityNotFoundException;
+import jakarta.persistence.OptimisticLockException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -47,6 +49,14 @@ public class GlobalExceptionHandler {
         return ResponseEntity
                 .status(status)
                 .body(ErrorResponse.of(status.name(), exception.getMessage()));
+    }
+
+    @ExceptionHandler({OptimisticLockException.class, ObjectOptimisticLockingFailureException.class})
+    public ResponseEntity<ErrorResponse> handleOptimisticLockException(Exception exception) {
+        HttpStatus status = HttpStatus.CONFLICT;
+        return ResponseEntity
+                .status(status)
+                .body(ErrorResponse.of(status.name(), "Agent proposal was already modified; refresh and retry"));
     }
 
     @ExceptionHandler(Exception.class)

@@ -8,6 +8,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.PrePersist;
 import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -39,6 +40,10 @@ public class AgentProposal {
 
     @Column(nullable = false, length = 1000)
     private String summary;
+
+    @Version
+    @Column(nullable = false)
+    private Long version;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
@@ -118,6 +123,10 @@ public class AgentProposal {
 
     public String getSummary() {
         return summary;
+    }
+
+    public Long getVersion() {
+        return version;
     }
 
     public Instant getCreatedAt() {
